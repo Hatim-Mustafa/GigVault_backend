@@ -1,6 +1,10 @@
 from dataclasses import dataclass
 import os
 from urllib.parse import quote_plus
+from dotenv import load_dotenv
+
+# load variables from .env into the environment so Settings() picks them up
+load_dotenv()
 
 
 def _env(name: str, default: str = "") -> str:
