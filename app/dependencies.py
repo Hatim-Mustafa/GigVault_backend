@@ -32,8 +32,8 @@ def get_current_user(authorization: str | None = Header(default=None), db=Depend
     user = db.execute(stmt).mappings().first()
     if not user:
         raise_app_error("UNAUTHORIZED", "User not found", status_code=401)
-    if user.get("status") == "BANNED":
-        raise_app_error("FORBIDDEN", "User is banned", status_code=403)
+    if user.get("is_active") is False:
+        raise_app_error("FORBIDDEN", "User is inactive", status_code=403)
     return user
 
 
