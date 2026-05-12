@@ -40,11 +40,11 @@ def list_bookings(
             bookings_contracts.c.booking_id,
             bookings_contracts.c.gig_id,
             bookings_contracts.c.band_id,
-            bookings_contracts.c.status,
-            bookings_contracts.c.pay_total,
-            gig_listings.c.title.label("gig_title"),
-            bands.c.name.label("band_name"),
-            gig_listings.c.event_date,
+            bookings_contracts.c.contract_status,
+            bookings_contracts.c.agreed_fee,
+            gig_listings.c.gig_title.label("gig_title"),
+            bands.c.band_name.label("band_name"),
+            gig_listings.c.performance_date,
         )
         .select_from(
             bookings_contracts.join(gig_listings, bookings_contracts.c.gig_id == gig_listings.c.gig_id)
@@ -63,7 +63,7 @@ def list_bookings(
         stmt = stmt.where(bookings_contracts.c.venue_owner_id == user_id)
 
     if status:
-        stmt = stmt.where(bookings_contracts.c.status == status)
+        stmt = stmt.where(bookings_contracts.c.contract_status == status)
 
     page, limit, offset = get_pagination(page, limit)
     total = db.execute(select(func.count()).select_from(stmt.subquery())).scalar_one() or 0
@@ -79,9 +79,13 @@ def list_bookings(
                 "gig_title": row["gig_title"],
                 "band_id": row["band_id"],
                 "band_name": row["band_name"],
-                "date": row["event_date"].isoformat() if row.get("event_date") else None,
-                "pay_total": float(row["pay_total"]),
-                "status": row["status"],
+                "date": (
+                    row["performance_date"].isoformat()
+                    if row.get("performance_date")
+                    else None
+                ),
+                "pay_total": float(row["agreed_fee"]),
+                "status": row["contract_status"],
             }
             for row in rows
         ],
@@ -94,11 +98,14 @@ def get_booking(booking_id: int, current_user=Depends(get_current_user), db=Depe
         db.execute(
             select(
                 bookings_contracts,
-                gig_listings.c.title.label("gig_title"),
-                gig_listings.c.event_date,
-                gig_listings.c.location_details,
-                bands.c.name.label("band_name"),
-                users.c.name.label("venue_owner_name"),
+                gig_listings.c.gig_title.label("gig_title"),
+                gig_listings.c.performance_date,
+                gig_listings.c.venue_name,
+                gig_listings.c.location_city,
+                gig_listings.c.location_zip_code,
+                bands.c.band_name.label("band_name"),
+                users.c.first_name,
+                users.c.last_name,
             )
             .select_from(
                 bookings_contracts.join(gig_listings, bookings_contracts.c.gig_id == gig_listings.c.gig_id)
@@ -124,7 +131,7 @@ def get_booking(booking_id: int, current_user=Depends(get_current_user), db=Depe
 
     payment_rows = (
         db.execute(
-            select(payments.c.payment_type, payments.c.amount, payments.c.status).where(
+            select(payments.c.payment_type, payments.c.amount, payments.c.payment_status).where(
                 payments.c.booking_id == booking_id
             )
         )
@@ -140,20 +147,28 @@ def get_booking(booking_id: int, current_user=Depends(get_current_user), db=Depe
         "gig_id": row["gig_id"],
         "gig_details": {
             "title": row["gig_title"],
-            "date": row["event_date"].isoformat() if row.get("event_date") else None,
-            "location": row["location_details"],
+            "date": (
+                row["performance_date"].isoformat() if row.get("performance_date") else None
+            ),
+            "location": {
+                "venue": row["venue_name"],
+                "city": row["location_city"],
+                "zip_code": row["location_zip_code"],
+            },
         },
         "band_id": row["band_id"],
         "band_name": row["band_name"],
         "venue_owner_id": row["venue_owner_id"],
-        "venue_owner_name": row["venue_owner_name"],
-        "pay_total": float(row["pay_total"]),
+        "venue_owner_name": f"{row['first_name']} {row['last_name']}".strip(),
+        "pay_total": float(row["agreed_fee"]),
         "deposit_amount": float(row["deposit_amount"] or 0),
-        "final_payment": float(row["final_payment"] or 0),
-        "status": row["status"],
-        "band_signed_at": row["band_signed_at"].isoformat() if row.get("band_signed_at") else None,
-        "venue_signed_at": row["venue_signed_at"].isoformat() if row.get("venue_signed_at") else None,
-        "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
+        "status": row["contract_status"],
+        "deposit_status": row["deposit_status"],
+        "contract_date": (
+            row["contract_date"].isoformat() if row.get("contract_date") else None
+        ),
+        "signed_at": row["signed_at"].isoformat() if row.get("signed_at") else None,
+        "completed_at": row["completed_at"].isoformat() if row.get("completed_at") else None,
     }
 
 
@@ -177,24 +192,22 @@ def sign_booking(
     if payload.signed_by_role == "MUSICIAN":
         if booking["band_id"] not in band_ids and current_user["role"] != "ADMIN":
             raise_app_error("FORBIDDEN", "Band member only", status_code=403)
-        update_values = {"band_signed_at": datetime.now(timezone.utc)}
+        update_values = {"signed_at": datetime.now(timezone.utc)}
     else:
         if booking["venue_owner_id"] != current_user["user_id"] and current_user["role"] != "ADMIN":
             raise_app_error("FORBIDDEN", "Venue owner only", status_code=403)
-        update_values = {"venue_signed_at": datetime.now(timezone.utc)}
+        update_values = {"signed_at": datetime.now(timezone.utc)}
 
     db.execute(update(bookings_contracts).where(bookings_contracts.c.booking_id == booking_id).values(**update_values))
 
-    updated = db.execute(select(bookings_contracts).where(bookings_contracts.c.booking_id == booking_id)).mappings().first()
-    if updated["band_signed_at"] and updated["venue_signed_at"]:
-        db.execute(
-            update(bookings_contracts)
-            .where(bookings_contracts.c.booking_id == booking_id)
-            .values(status="SIGNED", updated_at=datetime.now(timezone.utc))
-        )
+    db.execute(
+        update(bookings_contracts)
+        .where(bookings_contracts.c.booking_id == booking_id)
+        .values(contract_status="Active")
+    )
 
     return {
         "booking_id": booking_id,
         "signed_at": update_values[next(iter(update_values))].isoformat(),
-        "status": "SIGNED" if updated["band_signed_at"] and updated["venue_signed_at"] else "PENDING",
+        "status": "Active",
     }

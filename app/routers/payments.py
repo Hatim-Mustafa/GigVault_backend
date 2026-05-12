@@ -51,9 +51,9 @@ def list_payments(
             payments.c.booking_id,
             payments.c.amount,
             payments.c.payment_type,
-            payments.c.status,
-            payments.c.due_date,
-            gig_listings.c.title.label("gig_title"),
+            payments.c.payment_status,
+            payments.c.payment_date,
+            gig_listings.c.gig_title.label("gig_title"),
         )
         .select_from(
             payments.join(bookings_contracts, payments.c.booking_id == bookings_contracts.c.booking_id)
@@ -70,11 +70,11 @@ def list_payments(
         stmt = stmt.where(bookings_contracts.c.venue_owner_id == user_id)
 
     if status:
-        stmt = stmt.where(payments.c.status == status)
+        stmt = stmt.where(payments.c.payment_status == status)
     if date_from:
-        stmt = stmt.where(payments.c.due_date >= date_from)
+        stmt = stmt.where(payments.c.payment_date >= date_from)
     if date_to:
-        stmt = stmt.where(payments.c.due_date <= date_to)
+        stmt = stmt.where(payments.c.payment_date <= date_to)
     if booking_id:
         stmt = stmt.where(payments.c.booking_id == booking_id)
 
@@ -92,8 +92,10 @@ def list_payments(
                 "gig_title": row["gig_title"],
                 "amount": float(row["amount"]),
                 "payment_type": row["payment_type"],
-                "status": row["status"],
-                "due_date": row["due_date"].isoformat() if row.get("due_date") else None,
+                "status": row["payment_status"],
+                "due_date": (
+                    row["payment_date"].isoformat() if row.get("payment_date") else None
+                ),
             }
             for row in rows
         ],
@@ -108,7 +110,7 @@ def get_payment(payment_id: int, current_user=Depends(get_current_user), db=Depe
                 payments,
                 bookings_contracts.c.gig_id,
                 bookings_contracts.c.band_id,
-                gig_listings.c.title.label("gig_title"),
+                gig_listings.c.gig_title.label("gig_title"),
             )
             .select_from(
                 payments.join(bookings_contracts, payments.c.booking_id == bookings_contracts.c.booking_id)
@@ -139,9 +141,13 @@ def get_payment(payment_id: int, current_user=Depends(get_current_user), db=Depe
         "band_id": row["band_id"],
         "amount": float(row["amount"]),
         "payment_type": row["payment_type"],
-        "status": row["status"],
-        "due_date": row["due_date"].isoformat() if row.get("due_date") else None,
-        "paid_date": row["paid_date"].isoformat() if row.get("paid_date") else None,
+        "status": row["payment_status"],
+        "due_date": (
+            row["payment_date"].isoformat() if row.get("payment_date") else None
+        ),
+        "paid_date": (
+            row["payment_date"].isoformat() if row.get("payment_date") else None
+        ),
         "notes": row["notes"],
     }
 
@@ -171,10 +177,12 @@ def create_payment(
             insert(payments)
             .values(
                 booking_id=payload.booking_id,
+                band_id=booking["band_id"],
+                venue_owner_id=booking["venue_owner_id"],
                 amount=payload.amount,
                 payment_type=payload.payment_type,
-                paid_date=payload.paid_date,
-                status="PAID",
+                payment_date=payload.paid_date,
+                payment_status="Paid",
             )
             .returning(payments.c.payment_id, payments.c.created_at)
         )
@@ -185,7 +193,7 @@ def create_payment(
     return {
         "payment_id": row["payment_id"],
         "booking_id": payload.booking_id,
-        "status": "PAID",
+        "status": "Paid",
         "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
     }
 
@@ -217,7 +225,7 @@ def update_payment(
     db.execute(
         update(payments)
         .where(payments.c.payment_id == payment_id)
-        .values(status=payload.status, notes=payload.notes, updated_at=now)
+        .values(payment_status=payload.status, notes=payload.notes)
     )
 
     return {"payment_id": payment_id, "status": payload.status, "updated_at": now.isoformat()}

@@ -25,7 +25,7 @@ class ApplicationCreateRequest(BaseModel):
 
 
 class ApplicationUpdateRequest(BaseModel):
-    status: Literal["ACCEPTED", "REJECTED", "SHORTLISTED", "WITHDRAWN"]
+    status: Literal["Accepted", "Rejected", "Shortlisted", "Withdrawn"]
 
 
 @router.post("", status_code=201, dependencies=[Depends(require_role("MUSICIAN", "ADMIN"))])
@@ -37,7 +37,7 @@ def create_application(
     gig = db.execute(
         select(gig_listings).where(gig_listings.c.gig_id == payload.gig_id)
     ).mappings().first()
-    if not gig or gig["status"] != "OPEN":
+    if not gig or str(gig.get("gig_status", "")).lower() != "open":
         raise_app_error("NOT_FOUND", "Gig not available", status_code=404)
 
     member = (
@@ -69,13 +69,17 @@ def create_application(
     row = (
         db.execute(
             insert(applications)
-            .values(gig_id=payload.gig_id, band_id=payload.band_id, status="SUBMITTED")
+            .values(
+                gig_id=payload.gig_id,
+                band_id=payload.band_id,
+                application_status="Pending",
+            )
             .returning(
                 applications.c.application_id,
                 applications.c.gig_id,
                 applications.c.band_id,
-                applications.c.status,
-                applications.c.created_at,
+                applications.c.application_status,
+                applications.c.application_date,
             )
         )
         .mappings()
@@ -86,8 +90,10 @@ def create_application(
         "application_id": row["application_id"],
         "gig_id": row["gig_id"],
         "band_id": row["band_id"],
-        "status": row["status"],
-        "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
+        "status": row["application_status"],
+        "created_at": (
+            row["application_date"].isoformat() if row.get("application_date") else None
+        ),
     }
 
 
@@ -99,11 +105,11 @@ def get_application(application_id: int, current_user=Depends(get_current_user),
                 applications.c.application_id,
                 applications.c.gig_id,
                 applications.c.band_id,
-                applications.c.status,
-                applications.c.created_at,
-                applications.c.updated_at,
-                gig_listings.c.title.label("gig_title"),
-                bands.c.name.label("band_name"),
+                applications.c.application_status,
+                applications.c.application_date,
+                applications.c.last_updated,
+                gig_listings.c.gig_title.label("gig_title"),
+                bands.c.band_name.label("band_name"),
             )
             .select_from(
                 applications.join(gig_listings, applications.c.gig_id == gig_listings.c.gig_id)
@@ -123,9 +129,13 @@ def get_application(application_id: int, current_user=Depends(get_current_user),
         "gig_title": row["gig_title"],
         "band_id": row["band_id"],
         "band_name": row["band_name"],
-        "status": row["status"],
-        "applied_at": row["created_at"].isoformat() if row.get("created_at") else None,
-        "updated_at": row["updated_at"].isoformat() if row.get("updated_at") else None,
+        "status": row["application_status"],
+        "applied_at": (
+            row["application_date"].isoformat() if row.get("application_date") else None
+        ),
+        "updated_at": (
+            row["last_updated"].isoformat() if row.get("last_updated") else None
+        ),
     }
 
 
@@ -145,9 +155,9 @@ def list_applications(
         applications.c.application_id,
         applications.c.gig_id,
         applications.c.band_id,
-        applications.c.status,
-        gig_listings.c.title.label("gig_title"),
-        bands.c.name.label("band_name"),
+        applications.c.application_status,
+        gig_listings.c.gig_title.label("gig_title"),
+        bands.c.band_name.label("band_name"),
     ).select_from(
         applications.join(gig_listings, applications.c.gig_id == gig_listings.c.gig_id)
         .join(bands, applications.c.band_id == bands.c.band_id)
@@ -157,7 +167,7 @@ def list_applications(
         gig = db.execute(select(gig_listings).where(gig_listings.c.gig_id == gig_id)).mappings().first()
         if not gig:
             raise_app_error("NOT_FOUND", "Gig not found", status_code=404)
-        if current_user["role"] != "ADMIN" and gig["created_by"] != current_user["user_id"]:
+        if current_user["role"] != "ADMIN" and gig["venue_owner_id"] != current_user["user_id"]:
             raise_app_error("FORBIDDEN", "Venue owner only", status_code=403)
         stmt = stmt.where(applications.c.gig_id == gig_id)
 
@@ -177,7 +187,7 @@ def list_applications(
         stmt = stmt.where(applications.c.band_id == band_id)
 
     if status:
-        stmt = stmt.where(applications.c.status == status)
+        stmt = stmt.where(applications.c.application_status == status)
 
     count_stmt = select(func.count()).select_from(stmt.subquery())
     total = db.execute(count_stmt).scalar_one() or 0
@@ -193,7 +203,7 @@ def list_applications(
                 "gig_title": row["gig_title"],
                 "band_id": row["band_id"],
                 "band_name": row["band_name"],
-                "status": row["status"],
+                "status": row["application_status"],
             }
             for row in rows
         ],
@@ -211,8 +221,10 @@ def update_application_status(
         db.execute(
             select(
                 applications,
-                gig_listings.c.created_by,
-                gig_listings.c.pay_amount,
+                gig_listings.c.venue_owner_id,
+                gig_listings.c.offered_pay,
+                gig_listings.c.performance_date,
+                gig_listings.c.performance_time,
             )
             .select_from(
                 applications.join(gig_listings, applications.c.gig_id == gig_listings.c.gig_id)
@@ -225,22 +237,22 @@ def update_application_status(
     if not row:
         raise_app_error("NOT_FOUND", "Application not found", status_code=404)
 
-    if payload.status != "WITHDRAWN" and current_user["role"] != "ADMIN":
-        if row["created_by"] != current_user["user_id"]:
+    if payload.status != "Withdrawn" and current_user["role"] != "ADMIN":
+        if row["venue_owner_id"] != current_user["user_id"]:
             raise_app_error("FORBIDDEN", "Venue owner only", status_code=403)
 
     now = datetime.now(timezone.utc)
     db.execute(
         update(applications)
         .where(applications.c.application_id == application_id)
-        .values(status=payload.status, updated_at=now)
+        .values(application_status=payload.status, last_updated=now)
     )
 
-    if payload.status == "ACCEPTED":
+    if payload.status == "Accepted":
         db.execute(
             update(gig_listings)
             .where(gig_listings.c.gig_id == row["gig_id"])
-            .values(status="BOOKED", updated_at=now)
+            .values(gig_status="Booked", last_updated=now)
         )
         db.execute(
             update(applications)
@@ -250,17 +262,19 @@ def update_application_status(
                     applications.c.application_id != application_id,
                 )
             )
-            .values(status="REJECTED", updated_at=now)
+            .values(application_status="Rejected", last_updated=now)
         )
         db.execute(
             insert(bookings_contracts).values(
                 gig_id=row["gig_id"],
                 band_id=row["band_id"],
-                venue_owner_id=row["created_by"],
-                pay_total=row["pay_amount"],
+                venue_owner_id=row["venue_owner_id"],
+                agreed_fee=row["offered_pay"],
                 deposit_amount=0,
-                final_payment=row["pay_amount"],
-                status="PENDING",
+                deposit_status="Pending",
+                contract_status="Active",
+                performance_date=row["performance_date"],
+                performance_time=row["performance_time"],
             )
         )
 
@@ -304,7 +318,7 @@ def withdraw_application(
     db.execute(
         update(applications)
         .where(applications.c.application_id == application_id)
-        .values(status="WITHDRAWN", updated_at=now)
+        .values(application_status="Withdrawn", last_updated=now)
     )
 
     return {"message": "Application withdrawn"}

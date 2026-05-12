@@ -20,6 +20,15 @@ from ..tables import (
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_role("ADMIN"))])
 
 
+def _status_to_is_active(status: str) -> bool:
+    normalized = status.strip().lower()
+    if normalized in {"active", "true", "1"}:
+        return True
+    if normalized in {"inactive", "false", "0"}:
+        return False
+    raise_app_error("VALIDATION_ERROR", "Invalid status value", status_code=400)
+
+
 class AdminUserUpdateRequest(BaseModel):
     status: str | None = None
     role: str | None = None
@@ -53,7 +62,9 @@ def admin_dashboard(db=Depends(get_db)):
     )
     active_gigs = (
         db.execute(
-            select(func.count()).select_from(gig_listings).where(gig_listings.c.status == "OPEN")
+            select(func.count())
+            .select_from(gig_listings)
+            .where(gig_listings.c.gig_status == "Open")
         )
         .scalar_one()
         or 0
@@ -61,7 +72,9 @@ def admin_dashboard(db=Depends(get_db)):
     total_bookings = db.execute(select(func.count()).select_from(bookings_contracts)).scalar_one() or 0
     platform_revenue = (
         db.execute(
-            select(func.coalesce(func.sum(payments.c.amount), 0.0)).where(payments.c.status == "PAID")
+            select(func.coalesce(func.sum(payments.c.amount), 0.0)).where(
+                payments.c.payment_status == "Paid"
+            )
         )
         .scalar_one()
         or 0.0
@@ -69,7 +82,10 @@ def admin_dashboard(db=Depends(get_db)):
     pending_disputes = (
         db.execute(
             select(func.count()).select_from(reviews_disputes).where(
-                and_(reviews_disputes.c.type == "DISPUTE", reviews_disputes.c.status == "OPEN")
+                and_(
+                    reviews_disputes.c.review_type == "Dispute",
+                    reviews_disputes.c.status == "Open",
+                )
             )
         )
         .scalar_one()
@@ -79,7 +95,9 @@ def admin_dashboard(db=Depends(get_db)):
     today = datetime.now(timezone.utc).date()
     new_users_today = (
         db.execute(
-            select(func.count()).select_from(users).where(func.date(users.c.created_at) == today)
+            select(func.count())
+            .select_from(users)
+            .where(func.date(users.c.account_created_at) == today)
         )
         .scalar_one()
         or 0
@@ -97,7 +115,7 @@ def admin_dashboard(db=Depends(get_db)):
         db.execute(
             select(func.count())
             .select_from(bookings_contracts)
-            .where(func.date(bookings_contracts.c.created_at) == today)
+            .where(func.date(bookings_contracts.c.contract_date) == today)
         )
         .scalar_one()
         or 0
@@ -131,13 +149,25 @@ def list_users(
     db=Depends(get_db),
 ):
     page, limit, offset = get_pagination(page, limit)
-    stmt = select(users.c.user_id, users.c.email, users.c.name, users.c.role, users.c.status, users.c.created_at)
+    stmt = select(
+        users.c.user_id,
+        users.c.email,
+        users.c.first_name,
+        users.c.last_name,
+        users.c.role,
+        users.c.is_active,
+        users.c.account_created_at,
+    )
     if role:
         stmt = stmt.where(users.c.role == role)
     if status:
-        stmt = stmt.where(users.c.status == status)
+        stmt = stmt.where(users.c.is_active == _status_to_is_active(status))
     if search:
-        stmt = stmt.where(users.c.email.ilike(f"%{search}%") | users.c.name.ilike(f"%{search}%"))
+        stmt = stmt.where(
+            users.c.email.ilike(f"%{search}%")
+            | users.c.first_name.ilike(f"%{search}%")
+            | users.c.last_name.ilike(f"%{search}%")
+        )
 
     total = db.execute(select(func.count()).select_from(stmt.subquery())).scalar_one() or 0
     rows = db.execute(stmt.limit(limit).offset(offset)).mappings().all()
@@ -148,10 +178,14 @@ def list_users(
             {
                 "user_id": row["user_id"],
                 "email": row["email"],
-                "name": row["name"],
+                "name": f"{row['first_name']} {row['last_name']}".strip(),
                 "role": row["role"],
-                "status": row["status"],
-                "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
+                "status": "ACTIVE" if row["is_active"] else "INACTIVE",
+                "created_at": (
+                    row["account_created_at"].isoformat()
+                    if row.get("account_created_at")
+                    else None
+                ),
             }
             for row in rows
         ],
@@ -162,7 +196,7 @@ def list_users(
 def update_user(user_id: int, payload: AdminUserUpdateRequest, db=Depends(get_db)):
     update_values = {}
     if payload.status is not None:
-        update_values["status"] = payload.status
+        update_values["is_active"] = _status_to_is_active(payload.status)
     if payload.role is not None:
         update_values["role"] = payload.role
 
@@ -170,7 +204,7 @@ def update_user(user_id: int, payload: AdminUserUpdateRequest, db=Depends(get_db
         raise_app_error("VALIDATION_ERROR", "No fields to update", status_code=400)
 
     now = datetime.now(timezone.utc)
-    update_values["updated_at"] = now
+    update_values["last_updated"] = now
 
     result = db.execute(
         update(users).where(users.c.user_id == user_id).values(**update_values)
@@ -178,7 +212,8 @@ def update_user(user_id: int, payload: AdminUserUpdateRequest, db=Depends(get_db
     if result.rowcount == 0:
         raise_app_error("NOT_FOUND", "User not found", status_code=404)
 
-    return {"user_id": user_id, "status": update_values.get("status"), "updated_at": now.isoformat()}
+    status_value = "ACTIVE" if update_values.get("is_active", True) else "INACTIVE"
+    return {"user_id": user_id, "status": status_value, "updated_at": now.isoformat()}
 
 
 @router.post("/users/{user_id}/reset-password")
@@ -187,7 +222,7 @@ def reset_password(user_id: int, payload: AdminResetPasswordRequest, db=Depends(
     result = db.execute(
         update(users)
         .where(users.c.user_id == user_id)
-        .values(password_hash=password_hash, updated_at=datetime.now(timezone.utc))
+        .values(password_hash=password_hash, last_updated=datetime.now(timezone.utc))
     )
     if result.rowcount == 0:
         raise_app_error("NOT_FOUND", "User not found", status_code=404)
@@ -207,16 +242,16 @@ def list_gigs(
     page, limit, offset = get_pagination(page, limit)
     stmt = select(
         gig_listings.c.gig_id,
-        gig_listings.c.title,
-        gig_listings.c.status,
-        gig_listings.c.event_date,
+        gig_listings.c.gig_title,
+        gig_listings.c.gig_status,
+        gig_listings.c.performance_date,
     )
     if status:
-        stmt = stmt.where(gig_listings.c.status == status)
+        stmt = stmt.where(gig_listings.c.gig_status == status)
     if city:
-        stmt = stmt.where(gig_listings.c.city == city)
+        stmt = stmt.where(gig_listings.c.location_city == city)
     if search:
-        stmt = stmt.where(gig_listings.c.title.ilike(f"%{search}%"))
+        stmt = stmt.where(gig_listings.c.gig_title.ilike(f"%{search}%"))
 
     total = db.execute(select(func.count()).select_from(stmt.subquery())).scalar_one() or 0
     rows = db.execute(stmt.limit(limit).offset(offset)).mappings().all()
@@ -226,9 +261,13 @@ def list_gigs(
         "gigs": [
             {
                 "gig_id": row["gig_id"],
-                "title": row["title"],
-                "status": row["status"],
-                "date": row["event_date"].isoformat() if row.get("event_date") else None,
+                "title": row["gig_title"],
+                "status": row["gig_status"],
+                "date": (
+                    row["performance_date"].isoformat()
+                    if row.get("performance_date")
+                    else None
+                ),
             }
             for row in rows
         ],
@@ -252,12 +291,12 @@ def list_disputes(
 ):
     page, limit, offset = get_pagination(page, limit)
     stmt = select(
-        reviews_disputes.c.record_id,
+        reviews_disputes.c.review_id,
         reviews_disputes.c.booking_id,
-        reviews_disputes.c.reason,
+        reviews_disputes.c.dispute_reason,
         reviews_disputes.c.status,
         reviews_disputes.c.created_at,
-    ).where(reviews_disputes.c.type == "DISPUTE")
+    ).where(reviews_disputes.c.review_type == "Dispute")
     if status:
         stmt = stmt.where(reviews_disputes.c.status == status)
 
@@ -268,9 +307,9 @@ def list_disputes(
         "total": total,
         "disputes": [
             {
-                "dispute_id": row["record_id"],
+                "dispute_id": row["review_id"],
                 "booking_id": row["booking_id"],
-                "reason": row["reason"],
+                "reason": row["dispute_reason"],
                 "status": row["status"],
                 "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
             }
@@ -284,8 +323,8 @@ def resolve_dispute(dispute_id: int, payload: AdminDisputeUpdateRequest, db=Depe
     now = datetime.now(timezone.utc)
     result = db.execute(
         update(reviews_disputes)
-        .where(reviews_disputes.c.record_id == dispute_id)
-        .values(status=payload.status, resolution=payload.resolution, resolved_at=now)
+        .where(reviews_disputes.c.review_id == dispute_id)
+        .values(status=payload.status, admin_notes=payload.resolution, resolved_at=now)
     )
     if result.rowcount == 0:
         raise_app_error("NOT_FOUND", "Dispute not found", status_code=404)
@@ -305,12 +344,12 @@ def list_reviews(
 ):
     page, limit, offset = get_pagination(page, limit)
     stmt = select(
-        reviews_disputes.c.record_id,
+        reviews_disputes.c.review_id,
         reviews_disputes.c.booking_id,
         reviews_disputes.c.rating,
         reviews_disputes.c.status,
         reviews_disputes.c.created_at,
-    ).where(reviews_disputes.c.type == "REVIEW")
+    ).where(reviews_disputes.c.review_type == "Review")
 
     total = db.execute(select(func.count()).select_from(stmt.subquery())).scalar_one() or 0
     rows = db.execute(stmt.limit(limit).offset(offset)).mappings().all()
@@ -319,7 +358,7 @@ def list_reviews(
         "total": total,
         "reviews": [
             {
-                "review_id": row["record_id"],
+                "review_id": row["review_id"],
                 "booking_id": row["booking_id"],
                 "rating": row["rating"],
                 "status": row["status"],
@@ -335,7 +374,7 @@ def moderate_review(review_id: int, payload: AdminReviewUpdateRequest, db=Depend
     now = datetime.now(timezone.utc)
     result = db.execute(
         update(reviews_disputes)
-        .where(reviews_disputes.c.record_id == review_id)
+        .where(reviews_disputes.c.review_id == review_id)
         .values(status=payload.status, resolved_at=now)
     )
     if result.rowcount == 0:

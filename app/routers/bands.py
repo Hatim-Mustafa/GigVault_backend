@@ -7,7 +7,7 @@ from sqlalchemy import and_, delete, func, insert, select, update
 from ..dependencies import get_current_user, get_db, require_role
 from ..errors import raise_app_error
 from ..pagination import get_pagination
-from ..tables import band_genres, band_members, bands, user_instruments, users
+from ..tables import band_members, bands, users
 
 router = APIRouter(prefix="/bands", tags=["bands"])
 
@@ -46,7 +46,7 @@ def list_bands(
 
     band_ids_subq = (
         select(bands.c.band_id)
-        .where(bands.c.created_by == user_id)
+        .where(bands.c.leader_id == user_id)
         .union(select(band_members.c.band_id).where(band_members.c.user_id == user_id))
     ).subquery()
 
@@ -61,8 +61,9 @@ def list_bands(
     stmt = (
         select(
             bands.c.band_id,
-            bands.c.name,
-            bands.c.description,
+            bands.c.band_name,
+            bands.c.bio,
+            bands.c.genre,
             bands.c.created_at,
             func.coalesce(member_counts.c.member_count, 0).label("member_count"),
         )
@@ -80,21 +81,6 @@ def list_bands(
     )
     rows = db.execute(stmt).mappings().all()
 
-    band_ids = [row["band_id"] for row in rows]
-    genres_map = {}
-    if band_ids:
-        genre_rows = (
-            db.execute(
-                select(band_genres.c.band_id, band_genres.c.genre).where(
-                    band_genres.c.band_id.in_(band_ids)
-                )
-            )
-            .mappings()
-            .all()
-        )
-        for row in genre_rows:
-            genres_map.setdefault(row["band_id"], []).append(row["genre"])
-
     return {
         "total": total,
         "page": page,
@@ -102,9 +88,9 @@ def list_bands(
         "bands": [
             {
                 "band_id": row["band_id"],
-                "name": row["name"],
-                "description": row["description"],
-                "genres": genres_map.get(row["band_id"], []),
+                "name": row["band_name"],
+                "description": row["bio"],
+                "genres": [row["genre"]] if row.get("genre") else [],
                 "member_count": row["member_count"],
                 "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
             }
@@ -118,27 +104,29 @@ def create_band(payload: BandCreateRequest, current_user=Depends(get_current_use
     existing = (
         db.execute(
             select(bands.c.band_id).where(
-                and_(bands.c.created_by == current_user["user_id"], bands.c.name == payload.name)
+                and_(
+                    bands.c.leader_id == current_user["user_id"],
+                    bands.c.band_name == payload.name,
+                )
             )
         ).first()
     )
     if existing:
         raise_app_error("CONFLICT", "Band name already exists", status_code=409)
 
+    genre_value = ", ".join(payload.genres) if payload.genres else None
+
     stmt = (
         insert(bands)
         .values(
-            name=payload.name,
-            description=payload.description,
-            created_by=current_user["user_id"],
+            band_name=payload.name,
+            bio=payload.description,
+            leader_id=current_user["user_id"],
+            genre=genre_value or "Unknown",
         )
-        .returning(bands.c.band_id, bands.c.name, bands.c.created_at)
+        .returning(bands.c.band_id, bands.c.band_name, bands.c.created_at)
     )
     row = db.execute(stmt).mappings().first()
-
-    if payload.genres:
-        for genre in payload.genres:
-            db.execute(insert(band_genres).values(band_id=row["band_id"], genre=genre))
 
     db.execute(
         insert(band_members).values(
@@ -149,7 +137,7 @@ def create_band(payload: BandCreateRequest, current_user=Depends(get_current_use
 
     return {
         "band_id": row["band_id"],
-        "name": row["name"],
+        "name": row["band_name"],
         "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
     }
 
@@ -160,19 +148,15 @@ def get_band(band_id: int, current_user=Depends(get_current_user), db=Depends(ge
     if not band:
         raise_app_error("NOT_FOUND", "Band not found", status_code=404)
 
-    genre_rows = (
-        db.execute(select(band_genres.c.genre).where(band_genres.c.band_id == band_id))
-        .scalars()
-        .all()
-    )
-
     member_rows = (
         db.execute(
             select(
                 band_members.c.member_id,
                 band_members.c.user_id,
-                band_members.c.joined_at,
-                users.c.name,
+                band_members.c.joined_date,
+                band_members.c.instrument,
+                users.c.first_name,
+                users.c.last_name,
             )
             .select_from(
                 band_members.join(users, band_members.c.user_id == users.c.user_id)
@@ -182,38 +166,25 @@ def get_band(band_id: int, current_user=Depends(get_current_user), db=Depends(ge
         .mappings()
         .all()
     )
-    member_ids = [row["user_id"] for row in member_rows]
-    instruments_map = {}
-    if member_ids:
-        instrument_rows = (
-            db.execute(
-                select(user_instruments.c.user_id, user_instruments.c.instrument).where(
-                    user_instruments.c.user_id.in_(member_ids)
-                )
-            )
-            .mappings()
-            .all()
-        )
-        for row in instrument_rows:
-            instruments_map.setdefault(row["user_id"], []).append(row["instrument"])
-
     return {
         "band_id": band["band_id"],
-        "name": band["name"],
-        "description": band["description"],
-        "genres": genre_rows,
+        "name": band["band_name"],
+        "description": band["bio"],
+        "genres": [band["genre"]] if band.get("genre") else [],
         "members": [
             {
                 "member_id": row["member_id"],
                 "user_id": row["user_id"],
-                "name": row["name"],
-                "instruments": instruments_map.get(row["user_id"], []),
-                "joined_at": row["joined_at"].isoformat() if row.get("joined_at") else None,
+                "name": f"{row['first_name']} {row['last_name']}".strip(),
+                "instruments": [row["instrument"]] if row.get("instrument") else [],
+                "joined_at": (
+                    row["joined_date"].isoformat() if row.get("joined_date") else None
+                ),
             }
             for row in member_rows
         ],
         "created_at": band["created_at"].isoformat() if band.get("created_at") else None,
-        "created_by": band["created_by"],
+        "created_by": band["leader_id"],
     }
 
 
@@ -228,8 +199,10 @@ def list_band_members(band_id: int, current_user=Depends(get_current_user), db=D
             select(
                 band_members.c.member_id,
                 band_members.c.user_id,
-                band_members.c.joined_at,
-                users.c.name,
+                band_members.c.joined_date,
+                band_members.c.instrument,
+                users.c.first_name,
+                users.c.last_name,
             )
             .select_from(
                 band_members.join(users, band_members.c.user_id == users.c.user_id)
@@ -239,30 +212,17 @@ def list_band_members(band_id: int, current_user=Depends(get_current_user), db=D
         .mappings()
         .all()
     )
-    member_ids = [row["user_id"] for row in member_rows]
-    instruments_map = {}
-    if member_ids:
-        instrument_rows = (
-            db.execute(
-                select(user_instruments.c.user_id, user_instruments.c.instrument).where(
-                    user_instruments.c.user_id.in_(member_ids)
-                )
-            )
-            .mappings()
-            .all()
-        )
-        for row in instrument_rows:
-            instruments_map.setdefault(row["user_id"], []).append(row["instrument"])
-
     return {
         "band_id": band_id,
         "members": [
             {
                 "member_id": row["member_id"],
                 "user_id": row["user_id"],
-                "name": row["name"],
-                "instruments": instruments_map.get(row["user_id"], []),
-                "joined_at": row["joined_at"].isoformat() if row.get("joined_at") else None,
+                "name": f"{row['first_name']} {row['last_name']}".strip(),
+                "instruments": [row["instrument"]] if row.get("instrument") else [],
+                "joined_at": (
+                    row["joined_date"].isoformat() if row.get("joined_date") else None
+                ),
             }
             for row in member_rows
         ],
@@ -279,24 +239,21 @@ def update_band(
     band = db.execute(select(bands).where(bands.c.band_id == band_id)).mappings().first()
     if not band:
         raise_app_error("NOT_FOUND", "Band not found", status_code=404)
-    if current_user["role"] != "ADMIN" and band["created_by"] != current_user["user_id"]:
+    if current_user["role"] != "ADMIN" and band["leader_id"] != current_user["user_id"]:
         raise_app_error("FORBIDDEN", "Band creator only", status_code=403)
 
     update_values = {}
     if payload.name is not None:
-        update_values["name"] = payload.name
+        update_values["band_name"] = payload.name
     if payload.description is not None:
-        update_values["description"] = payload.description
+        update_values["bio"] = payload.description
+    if payload.genres is not None:
+        update_values["genre"] = ", ".join(payload.genres) if payload.genres else None
 
     now = datetime.now(timezone.utc)
     if update_values:
-        update_values["updated_at"] = now
+        update_values["last_updated"] = now
         db.execute(update(bands).where(bands.c.band_id == band_id).values(**update_values))
-
-    if payload.genres is not None:
-        db.execute(delete(band_genres).where(band_genres.c.band_id == band_id))
-        for genre in payload.genres:
-            db.execute(insert(band_genres).values(band_id=band_id, genre=genre))
 
     return {"band_id": band_id, "updated_at": now.isoformat()}
 
@@ -311,7 +268,7 @@ def add_band_member(
     band = db.execute(select(bands).where(bands.c.band_id == band_id)).mappings().first()
     if not band:
         raise_app_error("NOT_FOUND", "Band not found", status_code=404)
-    if current_user["role"] != "ADMIN" and band["created_by"] != current_user["user_id"]:
+    if current_user["role"] != "ADMIN" and band["leader_id"] != current_user["user_id"]:
         raise_app_error("FORBIDDEN", "Band creator only", status_code=403)
 
     user = db.execute(select(users.c.user_id).where(users.c.user_id == payload.user_id)).first()
@@ -331,20 +288,16 @@ def add_band_member(
     row = (
         db.execute(
             insert(band_members)
-            .values(band_id=band_id, user_id=payload.user_id)
+            .values(
+                band_id=band_id,
+                user_id=payload.user_id,
+                instrument=(payload.instruments[0] if payload.instruments else None),
+            )
             .returning(band_members.c.member_id)
         )
         .mappings()
         .first()
     )
-
-    if payload.instruments:
-        for instrument in payload.instruments:
-            db.execute(
-                insert(user_instruments).values(
-                    user_id=payload.user_id, instrument=instrument.strip()
-                )
-            )
 
     return {
         "member_id": row["member_id"],
@@ -363,7 +316,7 @@ def remove_band_member(
     band = db.execute(select(bands).where(bands.c.band_id == band_id)).mappings().first()
     if not band:
         raise_app_error("NOT_FOUND", "Band not found", status_code=404)
-    if current_user["role"] != "ADMIN" and band["created_by"] != current_user["user_id"]:
+    if current_user["role"] != "ADMIN" and band["leader_id"] != current_user["user_id"]:
         raise_app_error("FORBIDDEN", "Band creator only", status_code=403)
 
     result = db.execute(

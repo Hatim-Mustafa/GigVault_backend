@@ -46,23 +46,22 @@ def create_dispute(
             insert(reviews_disputes)
             .values(
                 booking_id=payload.booking_id,
-                filed_by=current_user["user_id"],
-                reason=payload.reason,
-                description=payload.description,
-                evidence_urls=payload.evidence_urls,
-                type="DISPUTE",
-                status="OPEN",
+                reviewer_id=current_user["user_id"],
+                dispute_reason=payload.reason,
+                review_text=payload.description,
+                review_type="Dispute",
+                status="Open",
             )
-            .returning(reviews_disputes.c.record_id, reviews_disputes.c.created_at)
+            .returning(reviews_disputes.c.review_id, reviews_disputes.c.created_at)
         )
         .mappings()
         .first()
     )
 
     return {
-        "dispute_id": row["record_id"],
+        "dispute_id": row["review_id"],
         "booking_id": payload.booking_id,
-        "status": "OPEN",
+        "status": "Open",
         "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
     }
 
@@ -72,22 +71,25 @@ def get_dispute(dispute_id: int, current_user=Depends(get_current_user), db=Depe
     row = (
         db.execute(
             select(
-                reviews_disputes.c.record_id,
+                reviews_disputes.c.review_id,
                 reviews_disputes.c.booking_id,
-                reviews_disputes.c.filed_by,
-                reviews_disputes.c.reason,
-                reviews_disputes.c.description,
+                reviews_disputes.c.reviewer_id,
+                reviews_disputes.c.dispute_reason,
+                reviews_disputes.c.review_text,
                 reviews_disputes.c.status,
-                reviews_disputes.c.resolution,
+                reviews_disputes.c.admin_notes,
                 reviews_disputes.c.created_at,
                 reviews_disputes.c.resolved_at,
-                users.c.name,
+                users.c.first_name,
+                users.c.last_name,
             )
-            .select_from(reviews_disputes.join(users, reviews_disputes.c.filed_by == users.c.user_id))
+            .select_from(
+                reviews_disputes.join(users, reviews_disputes.c.reviewer_id == users.c.user_id)
+            )
             .where(
                 and_(
-                    reviews_disputes.c.record_id == dispute_id,
-                    reviews_disputes.c.type == "DISPUTE",
+                    reviews_disputes.c.review_id == dispute_id,
+                    reviews_disputes.c.review_type == "Dispute",
                 )
             )
         )
@@ -98,13 +100,16 @@ def get_dispute(dispute_id: int, current_user=Depends(get_current_user), db=Depe
         raise_app_error("NOT_FOUND", "Dispute not found", status_code=404)
 
     return {
-        "dispute_id": row["record_id"],
+        "dispute_id": row["review_id"],
         "booking_id": row["booking_id"],
-        "filed_by": {"user_id": row["filed_by"], "name": row["name"]},
-        "reason": row["reason"],
-        "description": row["description"],
+        "filed_by": {
+            "user_id": row["reviewer_id"],
+            "name": f"{row['first_name']} {row['last_name']}".strip(),
+        },
+        "reason": row["dispute_reason"],
+        "description": row["review_text"],
         "status": row["status"],
-        "resolution": row["resolution"],
+        "resolution": row["admin_notes"],
         "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
         "resolved_at": row["resolved_at"].isoformat() if row.get("resolved_at") else None,
     }
@@ -125,18 +130,18 @@ def list_disputes(
     page, limit, offset = get_pagination(page, limit)
 
     stmt = select(
-        reviews_disputes.c.record_id,
+        reviews_disputes.c.review_id,
         reviews_disputes.c.booking_id,
-        reviews_disputes.c.reason,
+        reviews_disputes.c.dispute_reason,
         reviews_disputes.c.status,
         reviews_disputes.c.created_at,
-    ).where(reviews_disputes.c.type == "DISPUTE")
+    ).where(reviews_disputes.c.review_type == "Dispute")
 
     if status:
         stmt = stmt.where(reviews_disputes.c.status == status)
 
     if current_user["role"] != "ADMIN":
-        stmt = stmt.where(reviews_disputes.c.filed_by == user_id)
+        stmt = stmt.where(reviews_disputes.c.reviewer_id == user_id)
 
     total = db.execute(select(func.count()).select_from(stmt.subquery())).scalar_one() or 0
     rows = db.execute(stmt.limit(limit).offset(offset)).mappings().all()
@@ -145,9 +150,9 @@ def list_disputes(
         "total": total,
         "disputes": [
             {
-                "dispute_id": row["record_id"],
+                "dispute_id": row["review_id"],
                 "booking_id": row["booking_id"],
-                "reason": row["reason"],
+                "reason": row["dispute_reason"],
                 "status": row["status"],
                 "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
             }

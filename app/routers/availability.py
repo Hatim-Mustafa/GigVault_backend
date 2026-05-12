@@ -32,9 +32,9 @@ def get_availability(
 
     stmt = select(availability_calendar).where(availability_calendar.c.user_id == user_id)
     if date_from:
-        stmt = stmt.where(availability_calendar.c.date >= date_from)
+        stmt = stmt.where(availability_calendar.c.busy_date >= date_from)
     if date_to:
-        stmt = stmt.where(availability_calendar.c.date <= date_to)
+        stmt = stmt.where(availability_calendar.c.busy_date <= date_to)
 
     busy_rows = db.execute(stmt).mappings().all()
 
@@ -46,8 +46,8 @@ def get_availability(
     booking_stmt = (
         select(
             gig_listings.c.gig_id,
-            gig_listings.c.event_date,
-            gig_listings.c.title,
+            gig_listings.c.performance_date,
+            gig_listings.c.gig_title,
         )
         .select_from(
             bookings_contracts.join(gig_listings, bookings_contracts.c.gig_id == gig_listings.c.gig_id)
@@ -64,7 +64,9 @@ def get_availability(
         "user_id": user_id,
         "busy_dates": [
             {
-                "date": row["date"].isoformat() if row.get("date") else None,
+                "date": (
+                    row["busy_date"].isoformat() if row.get("busy_date") else None
+                ),
                 "reason": row["reason"],
             }
             for row in busy_rows
@@ -72,8 +74,12 @@ def get_availability(
         "booked_gigs": [
             {
                 "gig_id": row["gig_id"],
-                "date": row["event_date"].isoformat() if row.get("event_date") else None,
-                "title": row["title"],
+                "date": (
+                    row["performance_date"].isoformat()
+                    if row.get("performance_date")
+                    else None
+                ),
+                "title": row["gig_title"],
             }
             for row in booked_rows
         ],
@@ -94,13 +100,12 @@ def block_date(
             insert(availability_calendar)
             .values(
                 user_id=payload.user_id,
-                date=payload.date,
+                busy_date=payload.date,
                 reason=payload.reason,
-                notes=payload.notes,
             )
             .returning(
                 availability_calendar.c.availability_id,
-                availability_calendar.c.date,
+                availability_calendar.c.busy_date,
                 availability_calendar.c.created_at,
             )
         )
@@ -110,7 +115,7 @@ def block_date(
 
     return {
         "availability_id": row["availability_id"],
-        "date": row["date"].isoformat() if row.get("date") else None,
+        "date": row["busy_date"].isoformat() if row.get("busy_date") else None,
         "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
     }
 

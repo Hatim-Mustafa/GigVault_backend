@@ -187,7 +187,6 @@ Fetch user profile details.
   "city": "string",
   "bio": "string",
   "profile_pic": "string (URL)",
-  "instruments": ["string (optional, for musicians)"],
   "created_at": "ISO8601",
   "updated_at": "ISO8601"
 }
@@ -195,7 +194,6 @@ Fetch user profile details.
 
 **Database Operations:**
 - SELECT from `users` where `user_id = {id}`
-- JOIN with `user_instruments` if musician
 
 **RBAC:** User can view own profile; admins can view any
 
@@ -211,7 +209,6 @@ Update user profile.
   "city": "string (optional)",
   "bio": "string (optional)",
   "profile_pic": "string (optional, URL)",
-  "instruments": ["string (optional, array for musicians)"]
 }
 ```
 
@@ -226,7 +223,6 @@ Update user profile.
 
 **Database Operations:**
 - UPDATE `users` set fields where `user_id = {id}`
-- INSERT/DELETE from `user_instruments` if instruments updated
 
 **RBAC:** User can only update own profile
 
@@ -314,8 +310,8 @@ List bands managed/owned by user.
 ```
 
 **Database Operations:**
-- SELECT from `bands` where `created_by = {user_id}` (or band member check)
-- JOIN with `band_genres`, COUNT `band_members`
+- SELECT from `bands` where `leader_id = {user_id}` (or band member check)
+- COUNT `band_members`
 - LIMIT and OFFSET for pagination
 
 **RBAC:** Musicians only
@@ -344,9 +340,8 @@ Create new band.
 ```
 
 **Database Operations:**
-- INSERT into `bands` (name, description, created_by)
-- INSERT into `band_genres` for each genre
-- Enforce unique constraint on (user_id, band_name)
+- INSERT into `bands` (band_name, bio, leader_id, genre)
+- Enforce unique constraint on (leader_id, band_name)
 
 **RBAC:** Musicians only
 
@@ -382,8 +377,7 @@ Get band profile with members.
 **Database Operations:**
 - SELECT from `bands` where `band_id = {id}`
 - JOIN with `band_members` → `users`
-- JOIN with `band_genres`
-- JOIN with `user_instruments` (per member)
+- Use `band_members.instrument` for member instruments
 
 ---
 
@@ -408,8 +402,7 @@ Update band information.
 ```
 
 **Database Operations:**
-- UPDATE `bands` set fields
-- DELETE old `band_genres` rows + INSERT new ones (if genres updated)
+- UPDATE `bands` set fields (including `genre` as comma-separated string)
 
 **RBAC:** Band creator only
 
@@ -422,7 +415,7 @@ Add member to band.
 ```json
 {
   "user_id": "integer",
-  "instruments": ["string (optional, array)"]
+  "instruments": ["string (optional, array - first item stored in band_members.instrument)"]
 }
 ```
 
@@ -436,8 +429,7 @@ Add member to band.
 ```
 
 **Database Operations:**
-- INSERT into `band_members` (band_id, user_id)
-- INSERT into `user_instruments` for each instrument
+- INSERT into `band_members` (band_id, user_id, instrument)
 - Prevent duplicate membership (unique constraint)
 
 **RBAC:** Band creator only
@@ -476,7 +468,7 @@ Browse all open gigs with filters.
 - `date_from`, `date_to` (optional): Date range (ISO8601)
 - `pay_min`, `pay_max` (optional): Pay range
 - `search` (optional): Text search in title/description
-- `status` (optional): Default "OPEN"
+- `status` (optional): Default "Open"
 - `sort_by` (optional): "date", "pay", "newest"
 - `page`, `limit` (optional): Pagination
 
@@ -494,7 +486,7 @@ Browse all open gigs with filters.
       "city": "string",
       "genres": ["string"],
       "pay": "float",
-      "status": "OPEN | BOOKED | CANCELLED"
+      "status": "Open | Booked | Cancelled"
     }
   ]
 }
@@ -503,7 +495,7 @@ Browse all open gigs with filters.
 **Database Operations:**
 - SELECT from `gig_listings` with multiple WHERE conditions
 - JOIN with `users` (venue owner info)
-- JOIN with `gig_genres` (optional, if genres table exists)
+- `genre_required` stored as comma-separated string in `gig_listings`
 - Use indexes on (city, date, status, pay)
 - LIMIT, OFFSET for pagination
 - ORDER BY based on sort_by parameter
@@ -528,13 +520,13 @@ Get full gig details.
     "contact": "string"
   },
   "date": "ISO8601",
-  "end_time": "ISO8601",
+  "end_time": "HH:MM",
   "city": "string",
   "location_details": "string",
   "genres": ["string"],
   "pay_amount": "float",
   "requirements": "string",
-  "status": "OPEN | BOOKED | CANCELLED",
+  "status": "Open | Booked | Cancelled",
   "created_at": "ISO8601"
 }
 ```
@@ -542,7 +534,7 @@ Get full gig details.
 **Database Operations:**
 - SELECT from `gig_listings` where `gig_id = {id}`
 - JOIN with `users` for venue owner
-- JOIN with `gig_genres` (if applicable)
+- `genre_required` stored as comma-separated string in `gig_listings`
 
 ---
 
@@ -555,7 +547,7 @@ Create new gig listing (venue owner only).
   "title": "string (required)",
   "description": "string",
   "date": "ISO8601 (required, must be future date)",
-  "end_time": "ISO8601 (required)",
+  "end_time": "HH:MM (required)",
   "city": "string (required)",
   "location_details": "string",
   "genres": ["string (optional)"],
@@ -573,11 +565,10 @@ Create new gig listing (venue owner only).
 ```
 
 **Database Operations:**
-- INSERT into `gig_listings`
+- INSERT into `gig_listings` (gig_title, venue_owner_id, performance_date, performance_time, venue_name, location_city, genre_required)
 - Validate date is in future
 - Validate pay_amount >= 0
-- INSERT into `gig_genres` for each genre
-- Set status = 'OPEN'
+- Set status = 'Open'
 
 **RBAC:** Venue owners only
 
@@ -607,7 +598,6 @@ Update gig listing.
 
 **Database Operations:**
 - UPDATE `gig_listings` where `gig_id = {id}`
-- DELETE old `gig_genres` + INSERT new (if genres updated)
 
 **RBAC:** Venue owner only (creator check)
 
@@ -627,8 +617,7 @@ Delete/cancel gig listing.
 ```
 
 **Database Operations:**
-- DELETE from `gig_listings` where `gig_id = {id}`
-- Or UPDATE `gig_listings` set `status = 'CANCELLED'` (soft delete recommended)
+- UPDATE `gig_listings` set `gig_status = 'Cancelled'` (soft delete)
 
 **RBAC:** Venue owner only (creator check)
 
@@ -653,16 +642,16 @@ Submit application for a gig (musician/band).
   "application_id": "integer",
   "gig_id": "integer",
   "band_id": "integer",
-  "status": "SUBMITTED",
+  "status": "Pending",
   "created_at": "ISO8601"
 }
 ```
 
 **Database Operations:**
-- INSERT into `applications` (gig_id, band_id, status='SUBMITTED')
+- INSERT into `applications` (gig_id, band_id, application_status='Pending')
 - Enforce unique constraint on (gig_id, band_id) - one application per band per gig
 - Validate band exists and user is member
-- Validate gig exists and status = 'OPEN'
+- Validate gig exists and status = 'Open'
 
 **RBAC:** Musicians only
 
@@ -682,7 +671,7 @@ Get application details.
   "gig_title": "string",
   "band_id": "integer",
   "band_name": "string",
-  "status": "SUBMITTED | SHORTLISTED | ACCEPTED | REJECTED | WITHDRAWN",
+  "status": "Pending | Shortlisted | Accepted | Rejected | Withdrawn",
   "applied_at": "ISO8601",
   "updated_at": "ISO8601"
 }
@@ -700,7 +689,7 @@ List applications with filters.
 **Query Parameters:**
 - `gig_id` (optional): Filter by gig (venue owner)
 - `band_id` (optional): Filter by band (musician)
-- `status` (optional): SUBMITTED, ACCEPTED, REJECTED, etc.
+- `status` (optional): Pending, Accepted, Rejected, etc.
 - `page`, `limit` (optional)
 
 **Response (200):**
@@ -734,7 +723,7 @@ Update application status (accept/reject/shortlist).
 **Request Body:**
 ```json
 {
-  "status": "ACCEPTED | REJECTED | SHORTLISTED | WITHDRAWN"
+  "status": "Accepted | Rejected | Shortlisted | Withdrawn"
 }
 ```
 
@@ -748,8 +737,8 @@ Update application status (accept/reject/shortlist).
 ```
 
 **Database Operations:**
-- UPDATE `applications` set `status = {status}` where `application_id = {id}`
-- If status = 'ACCEPTED':
+- UPDATE `applications` set `application_status = {status}` where `application_id = {id}`
+- If status = 'Accepted':
   - Trigger: Create booking record
   - Trigger: Block availability dates for band + venue
   - Trigger: Reject/withdraw other applications for same gig
@@ -772,7 +761,7 @@ Withdraw application (musician only).
 ```
 
 **Database Operations:**
-- UPDATE `applications` set `status = 'WITHDRAWN'` where `application_id = {id}`
+- UPDATE `applications` set `application_status = 'Withdrawn'` where `application_id = {id}`
 
 **RBAC:** Application submitter only
 
@@ -785,7 +774,7 @@ List bookings for user.
 
 **Query Parameters:**
 - `user_id` (required)
-- `status` (optional): PENDING, SIGNED, COMPLETED
+- `status` (optional): Active, Completed
 - `page`, `limit` (optional)
 
 **Response (200):**
@@ -802,7 +791,7 @@ List bookings for user.
       "band_name": "string",
       "date": "ISO8601",
       "pay_total": "float",
-      "status": "PENDING | SIGNED | COMPLETED"
+      "status": "Active | Completed"
     }
   ]
 }
@@ -837,11 +826,11 @@ Get booking/contract details.
   "venue_owner_name": "string",
   "pay_total": "float",
   "deposit_amount": "float",
-  "final_payment": "float",
-  "status": "PENDING | SIGNED | COMPLETED",
-  "band_signed_at": "ISO8601 (optional)",
-  "venue_signed_at": "ISO8601 (optional)",
-  "created_at": "ISO8601"
+  "status": "Active | Completed",
+  "deposit_status": "Pending | Paid",
+  "contract_date": "ISO8601",
+  "signed_at": "ISO8601 (optional)",
+  "completed_at": "ISO8601 (optional)"
 }
 ```
 
@@ -867,15 +856,14 @@ Sign booking (e-signature by band or venue owner).
 {
   "booking_id": "integer",
   "signed_at": "ISO8601",
-  "status": "SIGNED (if both parties signed)"
+  "status": "Active"
 }
 ```
 
 **Database Operations:**
 - UPDATE `bookings_contracts`:
-  - If role = MUSICIAN: set `band_signed_at = NOW()`
-  - If role = VENUE_OWNER: set `venue_signed_at = NOW()`
-  - If both signed: set `status = 'SIGNED'`
+  - Set `signed_at = NOW()`
+  - Set `contract_status = 'Active'`
 
 **RBAC:** Band member or venue owner
 
@@ -927,8 +915,7 @@ Block date as unavailable.
 {
   "user_id": "integer (required)",
   "date": "ISO8601 (required)",
-  "reason": "BLOCKED | PERSONAL | OTHER",
-  "notes": "string (optional)"
+  "reason": "BLOCKED | PERSONAL | OTHER"
 }
 ```
 
@@ -942,7 +929,7 @@ Block date as unavailable.
 ```
 
 **Database Operations:**
-- INSERT into `availability_calendar` (user_id, date, reason, notes)
+- INSERT into `availability_calendar` (user_id, busy_date, reason)
 - Check for conflicts with existing bookings (optional warning)
 
 **RBAC:** User can block own dates only
@@ -1213,7 +1200,7 @@ List payments for user with filters.
       "gig_title": "string",
       "amount": "float",
       "payment_type": "DEPOSIT | FINAL",
-      "status": "PENDING | PAID",
+      "status": "Pending | Paid",
       "due_date": "ISO8601"
     }
   ]
@@ -1244,7 +1231,7 @@ Get payment details.
   "band_name": "string",
   "amount": "float",
   "payment_type": "DEPOSIT | FINAL",
-  "status": "PENDING | PAID",
+  "status": "Pending | Paid",
   "due_date": "ISO8601",
   "paid_date": "ISO8601 (optional)",
   "notes": "string (optional)"
@@ -1281,7 +1268,7 @@ Record new payment.
 ```
 
 **Database Operations:**
-- INSERT into `payments` (booking_id, amount, payment_type, paid_date, status='PAID')
+- INSERT into `payments` (booking_id, band_id, venue_owner_id, amount, payment_type, payment_date, payment_status='Paid')
 - Validate amount > 0
 - If payment_type='DEPOSIT': ensure amount <= booking.pay_total
 - Trigger: Update booking/payment status
@@ -1296,7 +1283,7 @@ Update payment status.
 **Request Body:**
 ```json
 {
-  "status": "PAID | PENDING",
+  "status": "Paid | Pending",
   "notes": "string (optional)"
 }
 ```
@@ -1393,6 +1380,7 @@ Create new recruitment ad.
 **Request Body:**
 ```json
 {
+  "band_id": "integer (required)",
   "title": "string (required)",
   "description": "string (optional)",
   "instruments_needed": ["string (required)"],
@@ -1410,8 +1398,7 @@ Create new recruitment ad.
 ```
 
 **Database Operations:**
-- INSERT into `recruitment_ads` (title, description, posted_by, city)
-- INSERT into ad_instruments (if separate table)
+- INSERT into `recruitment_ads` (band_id, posted_by_user_id, instruments_needed, genre, city)
 
 **RBAC:** Musicians only
 
@@ -1426,7 +1413,7 @@ Update recruitment ad.
   "title": "string (optional)",
   "description": "string (optional)",
   "instruments_needed": ["string (optional)"],
-  "status": "ACTIVE | CLOSED"
+  "status": "Active | Closed"
 }
 ```
 
@@ -1439,7 +1426,7 @@ Update recruitment ad.
 ```
 
 **Database Operations:**
-- UPDATE `recruitment_ads` set fields where `ad_id = {id}`
+- UPDATE `recruitment_ads` set fields where `recruitment_id = {id}`
 
 **RBAC:** Ad creator only
 
@@ -1459,7 +1446,7 @@ Delete recruitment ad.
 ```
 
 **Database Operations:**
-- DELETE from `recruitment_ads` where `ad_id = {id}`
+- DELETE from `recruitment_ads` where `recruitment_id = {id}`
 
 **RBAC:** Ad creator only
 
@@ -1489,7 +1476,7 @@ Submit review after a booking.
 ```
 
 **Database Operations:**
-- INSERT into `reviews_disputes` (booking_id, reviewer_id, rating, comment, type='REVIEW')
+- INSERT into `reviews_disputes` (booking_id, reviewer_id, rating, review_text, review_type='Review')
 - Validate booking is completed/closed
 - Validate no duplicate review per booking/user pair
 
@@ -1519,7 +1506,7 @@ Get review details.
 ```
 
 **Database Operations:**
-- SELECT from `reviews_disputes` where `review_id = {id}` AND `type = 'REVIEW'`
+- SELECT from `reviews_disputes` where `review_id = {id}` AND `review_type = 'Review'`
 
 ---
 
@@ -1548,7 +1535,7 @@ List reviews for user.
 ```
 
 **Database Operations:**
-- SELECT from `reviews_disputes` where type='REVIEW' and reviewer_id={user_id} or reviewee_id={user_id}
+- SELECT from `reviews_disputes` where review_type='Review' and reviewer_id={user_id} or reviewee_id={user_id}
 - LIMIT, OFFSET
 
 ---
@@ -1571,13 +1558,13 @@ File new dispute/flag.
 {
   "dispute_id": "integer",
   "booking_id": "integer",
-  "status": "OPEN",
+  "status": "Open",
   "created_at": "ISO8601"
 }
 ```
 
 **Database Operations:**
-- INSERT into `reviews_disputes` (booking_id, filed_by, reason, description, type='DISPUTE', status='OPEN')
+- INSERT into `reviews_disputes` (booking_id, reviewer_id, dispute_reason, review_text, review_type='Dispute', status='Open')
 
 **RBAC:** Booking parties only
 
@@ -1600,7 +1587,7 @@ Get dispute details.
   },
   "reason": "string",
   "description": "string",
-  "status": "OPEN | RESOLVED | DISMISSED",
+  "status": "Open | Resolved | Dismissed",
   "resolution": "string (optional)",
   "created_at": "ISO8601",
   "resolved_at": "ISO8601 (optional)"
@@ -1608,7 +1595,7 @@ Get dispute details.
 ```
 
 **Database Operations:**
-- SELECT from `reviews_disputes` where `dispute_id = {id}` AND `type = 'DISPUTE'`
+- SELECT from `reviews_disputes` where `review_id = {id}` AND `review_type = 'Dispute'`
 
 ---
 
@@ -1637,7 +1624,7 @@ List disputes for user.
 ```
 
 **Database Operations:**
-- SELECT from `reviews_disputes` where type='DISPUTE' and (filed_by={user_id} or involved party)
+- SELECT from `reviews_disputes` where review_type='Dispute' and reviewer_id={user_id}
 
 ---
 
@@ -1662,7 +1649,7 @@ Resolve dispute (admin only).
 ```
 
 **Database Operations:**
-- UPDATE `reviews_disputes` set `status = {status}`, `resolution = {resolution}`, `resolved_at = NOW()` where `dispute_id = {id}`
+- UPDATE `reviews_disputes` set `status = {status}`, `admin_notes = {resolution}`, `resolved_at = NOW()` where `review_id = {id}`
 
 **RBAC:** Admin only
 
@@ -1695,10 +1682,10 @@ Get admin dashboard statistics.
 
 **Database Operations:**
 - SELECT COUNT(*) from `users` (with role filter)
-- SELECT COUNT(*) from `gig_listings` where status='OPEN'
+- SELECT COUNT(*) from `gig_listings` where gig_status='Open'
 - SELECT COUNT(*) from `bookings_contracts`
-- SELECT SUM(amount) from `payments` where status='PAID'
-- SELECT COUNT(*) from `reviews_disputes` where type='DISPUTE' and status='OPEN'
+- SELECT SUM(amount) from `payments` where payment_status='Paid'
+- SELECT COUNT(*) from `reviews_disputes` where review_type='Dispute' and status='Open'
 
 **RBAC:** Admin only
 
@@ -1759,7 +1746,7 @@ Update user (ban/unban, role change).
 ```
 
 **Database Operations:**
-- UPDATE `users` set `status = {status}`, `role = {role}` where `user_id = {id}`
+- UPDATE `users` set `is_active = {status}`, `role = {role}` where `user_id = {id}`
 
 **RBAC:** Admin only
 
@@ -1952,14 +1939,14 @@ Apply these indexes in Supabase using SQL migrations or the SQL editor. Use `CRE
 
 ```sql
 -- Gigs
-CREATE INDEX idx_gig_listings_status ON gig_listings(status);
-CREATE INDEX idx_gig_listings_city_date ON gig_listings(city, event_date);
-CREATE INDEX idx_gig_listings_created_by ON gig_listings(created_by);
+CREATE INDEX idx_gig_listings_status ON gig_listings(gig_status);
+CREATE INDEX idx_gig_listings_city_date ON gig_listings(location_city, performance_date);
+CREATE INDEX idx_gig_listings_owner ON gig_listings(venue_owner_id);
 
 -- Applications
 CREATE INDEX idx_applications_gig_id ON applications(gig_id);
 CREATE INDEX idx_applications_band_id ON applications(band_id);
-CREATE INDEX idx_applications_status ON applications(status);
+CREATE INDEX idx_applications_status ON applications(application_status);
 
 -- Payments
 CREATE INDEX idx_payments_booking_id ON payments(booking_id);
@@ -1973,10 +1960,10 @@ CREATE INDEX idx_bookings_contracts_band_id ON bookings_contracts(band_id);
 CREATE UNIQUE INDEX idx_users_email ON users(email);
 
 -- Availability
-CREATE INDEX idx_availability_calendar_user_date ON availability_calendar(user_id, date);
+CREATE INDEX idx_availability_calendar_user_date ON availability_calendar(user_id, busy_date);
 
 -- Recruitment Ads
-CREATE INDEX idx_recruitment_ads_created_by ON recruitment_ads(created_by);
+CREATE INDEX idx_recruitment_ads_created_by ON recruitment_ads(posted_by_user_id);
 CREATE INDEX idx_recruitment_ads_city ON recruitment_ads(city);
 ```
 

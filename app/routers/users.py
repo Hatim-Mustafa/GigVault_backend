@@ -15,7 +15,6 @@ from ..tables import (
     gig_listings,
     payments,
     reviews_disputes,
-    user_instruments,
     users,
 )
 
@@ -30,6 +29,15 @@ class UserUpdateRequest(BaseModel):
     instruments: list[str] | None = None
 
 
+def _split_name(full_name: str) -> tuple[str, str]:
+    parts = full_name.strip().split()
+    if not parts:
+        return "", ""
+    if len(parts) == 1:
+        return parts[0], ""
+    return parts[0], " ".join(parts[1:])
+
+
 @router.get("/{user_id}")
 def get_user_profile(user_id: int, current_user=Depends(get_current_user), db=Depends(get_db)):
     if current_user["role"] != "ADMIN" and current_user["user_id"] != user_id:
@@ -39,23 +47,21 @@ def get_user_profile(user_id: int, current_user=Depends(get_current_user), db=De
     if not user:
         raise_app_error("NOT_FOUND", "User not found", status_code=404)
 
-    instruments = (
-        db.execute(select(user_instruments.c.instrument).where(user_instruments.c.user_id == user_id))
-        .scalars()
-        .all()
-    )
-
     return {
         "user_id": user["user_id"],
         "email": user["email"],
-        "name": user["name"],
+        "name": f"{user['first_name']} {user['last_name']}".strip(),
         "role": user["role"],
         "city": user.get("city"),
         "bio": user.get("bio"),
-        "profile_pic": user.get("profile_pic"),
-        "instruments": instruments,
-        "created_at": user["created_at"].isoformat() if user.get("created_at") else None,
-        "updated_at": user["updated_at"].isoformat() if user.get("updated_at") else None,
+        "profile_pic": user.get("profile_picture_url"),
+        "instruments": [],
+        "created_at": (
+            user["account_created_at"].isoformat()
+            if user.get("account_created_at")
+            else None
+        ),
+        "updated_at": user["last_updated"].isoformat() if user.get("last_updated") else None,
     }
 
 
@@ -71,25 +77,20 @@ def update_user_profile(
 
     update_values = {}
     if payload.name is not None:
-        update_values["name"] = payload.name
+        first_name, last_name = _split_name(payload.name)
+        update_values["first_name"] = first_name
+        update_values["last_name"] = last_name
     if payload.city is not None:
         update_values["city"] = payload.city
     if payload.bio is not None:
         update_values["bio"] = payload.bio
     if payload.profile_pic is not None:
-        update_values["profile_pic"] = payload.profile_pic
+        update_values["profile_picture_url"] = payload.profile_pic
 
     now = datetime.now(timezone.utc)
     if update_values:
-        update_values["updated_at"] = now
+        update_values["last_updated"] = now
         db.execute(update(users).where(users.c.user_id == user_id).values(**update_values))
-
-    if payload.instruments is not None:
-        db.execute(delete(user_instruments).where(user_instruments.c.user_id == user_id))
-        for instrument in payload.instruments:
-            db.execute(
-                insert(user_instruments).values(user_id=user_id, instrument=instrument.strip())
-            )
 
     return {
         "user_id": user_id,
@@ -123,7 +124,7 @@ def user_dashboard(user_id: int, current_user=Depends(get_current_user), db=Depe
         total_gigs_posted = (
             db.execute(
                 select(func.count()).select_from(gig_listings).where(
-                    gig_listings.c.created_by == user_id
+                    gig_listings.c.venue_owner_id == user_id
                 )
             )
             .scalar_one()
@@ -157,7 +158,7 @@ def user_dashboard(user_id: int, current_user=Depends(get_current_user), db=Depe
             select(func.avg(reviews_disputes.c.rating))
             .where(
                 and_(
-                    reviews_disputes.c.type == "REVIEW",
+                    reviews_disputes.c.review_type == "Review",
                     reviews_disputes.c.reviewee_id == user_id,
                 )
             )
@@ -177,7 +178,7 @@ def user_dashboard(user_id: int, current_user=Depends(get_current_user), db=Depe
             payments_stmt = payments_stmt.where(bookings_contracts.c.venue_owner_id == user_id)
         if band_ids:
             payments_stmt = payments_stmt.where(bookings_contracts.c.band_id.in_(band_ids))
-        payments_stmt = payments_stmt.where(payments.c.status == "PENDING")
+        payments_stmt = payments_stmt.where(payments.c.payment_status == "Pending")
         pending_payments = float(db.execute(payments_stmt).scalar_one() or 0.0)
 
     now = datetime.now(timezone.utc)
@@ -186,17 +187,17 @@ def user_dashboard(user_id: int, current_user=Depends(get_current_user), db=Depe
         stmt = (
             select(
                 gig_listings.c.gig_id,
-                gig_listings.c.title,
-                gig_listings.c.event_date,
-                gig_listings.c.pay_amount,
+                gig_listings.c.gig_title,
+                gig_listings.c.performance_date,
+                gig_listings.c.offered_pay,
             )
             .where(
                 and_(
-                    gig_listings.c.created_by == user_id,
-                    gig_listings.c.event_date >= now,
+                    gig_listings.c.venue_owner_id == user_id,
+                    gig_listings.c.performance_date >= now,
                 )
             )
-            .order_by(gig_listings.c.event_date.asc())
+            .order_by(gig_listings.c.performance_date.asc())
             .limit(5)
         )
         upcoming_gigs = db.execute(stmt).mappings().all()
@@ -204,9 +205,9 @@ def user_dashboard(user_id: int, current_user=Depends(get_current_user), db=Depe
         stmt = (
             select(
                 gig_listings.c.gig_id,
-                gig_listings.c.title,
-                gig_listings.c.event_date,
-                gig_listings.c.pay_amount,
+                gig_listings.c.gig_title,
+                gig_listings.c.performance_date,
+                gig_listings.c.offered_pay,
             )
             .select_from(
                 bookings_contracts.join(
@@ -217,10 +218,10 @@ def user_dashboard(user_id: int, current_user=Depends(get_current_user), db=Depe
             .where(
                 and_(
                     bookings_contracts.c.band_id.in_(band_ids),
-                    gig_listings.c.event_date >= now,
+                    gig_listings.c.performance_date >= now,
                 )
             )
-            .order_by(gig_listings.c.event_date.asc())
+            .order_by(gig_listings.c.performance_date.asc())
             .limit(5)
         )
         upcoming_gigs = db.execute(stmt).mappings().all()
@@ -230,9 +231,9 @@ def user_dashboard(user_id: int, current_user=Depends(get_current_user), db=Depe
         stmt = (
             select(
                 applications.c.application_id,
-                gig_listings.c.title.label("gig_title"),
-                bands.c.name.label("band_name"),
-                applications.c.status,
+                gig_listings.c.gig_title.label("gig_title"),
+                bands.c.band_name.label("band_name"),
+                applications.c.application_status,
             )
             .select_from(
                 applications.join(gig_listings, applications.c.gig_id == gig_listings.c.gig_id)
@@ -240,8 +241,8 @@ def user_dashboard(user_id: int, current_user=Depends(get_current_user), db=Depe
             )
             .where(
                 and_(
-                    gig_listings.c.created_by == user_id,
-                    applications.c.status == "SUBMITTED",
+                    gig_listings.c.venue_owner_id == user_id,
+                    applications.c.application_status == "Pending",
                 )
             )
             .limit(5)
@@ -251,9 +252,9 @@ def user_dashboard(user_id: int, current_user=Depends(get_current_user), db=Depe
         stmt = (
             select(
                 applications.c.application_id,
-                gig_listings.c.title.label("gig_title"),
-                bands.c.name.label("band_name"),
-                applications.c.status,
+                gig_listings.c.gig_title.label("gig_title"),
+                bands.c.band_name.label("band_name"),
+                applications.c.application_status,
             )
             .select_from(
                 applications.join(gig_listings, applications.c.gig_id == gig_listings.c.gig_id)
@@ -270,7 +271,7 @@ def user_dashboard(user_id: int, current_user=Depends(get_current_user), db=Depe
             payments.c.payment_id,
             payments.c.booking_id,
             payments.c.amount,
-            payments.c.status,
+            payments.c.payment_status,
         )
         .select_from(
             payments.join(
@@ -278,7 +279,7 @@ def user_dashboard(user_id: int, current_user=Depends(get_current_user), db=Depe
                 payments.c.booking_id == bookings_contracts.c.booking_id,
             )
         )
-        .where(payments.c.status == "PENDING")
+        .where(payments.c.payment_status == "Pending")
         .limit(5)
     )
     if user["role"] == "VENUE_OWNER":
@@ -291,7 +292,7 @@ def user_dashboard(user_id: int, current_user=Depends(get_current_user), db=Depe
 
     return {
         "user_id": user["user_id"],
-        "user_name": user["name"],
+        "user_name": f"{user['first_name']} {user['last_name']}".strip(),
         "role": user["role"],
         "stats": {
             "total_gigs_posted": total_gigs_posted,
@@ -303,9 +304,13 @@ def user_dashboard(user_id: int, current_user=Depends(get_current_user), db=Depe
         "upcoming_gigs": [
             {
                 "gig_id": row["gig_id"],
-                "title": row["title"],
-                "date": row["event_date"].isoformat() if row.get("event_date") else None,
-                "pay": float(row["pay_amount"]),
+                "title": row["gig_title"],
+                "date": (
+                    row["performance_date"].isoformat()
+                    if row.get("performance_date")
+                    else None
+                ),
+                "pay": float(row["offered_pay"]),
             }
             for row in upcoming_gigs
         ],
@@ -314,7 +319,7 @@ def user_dashboard(user_id: int, current_user=Depends(get_current_user), db=Depe
                 "application_id": row["application_id"],
                 "gig_title": row["gig_title"],
                 "band_name": row["band_name"],
-                "status": row["status"],
+                "status": row["application_status"],
             }
             for row in pending_applications
         ],
@@ -323,7 +328,7 @@ def user_dashboard(user_id: int, current_user=Depends(get_current_user), db=Depe
                 "payment_id": row["payment_id"],
                 "booking_id": row["booking_id"],
                 "amount": float(row["amount"]),
-                "status": row["status"],
+                "status": row["payment_status"],
             }
             for row in pending_payments_list
         ],

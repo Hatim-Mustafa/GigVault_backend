@@ -65,7 +65,7 @@ def list_setlists(
     stmt = (
         select(
             setlists.c.setlist_id,
-            setlists.c.name,
+            setlists.c.setlist_name,
             setlists.c.gig_id,
             setlists.c.created_at,
         )
@@ -103,7 +103,7 @@ def list_setlists(
         "setlists": [
             {
                 "setlist_id": row["setlist_id"],
-                "name": row["name"],
+                "name": row["setlist_name"],
                 "gig_id": row["gig_id"],
                 "song_count": song_counts.get(row["setlist_id"], 0),
                 "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
@@ -124,8 +124,8 @@ def create_setlist(
     row = (
         db.execute(
             insert(setlists)
-            .values(band_id=payload.band_id, name=payload.name, gig_id=payload.gig_id)
-            .returning(setlists.c.setlist_id, setlists.c.name, setlists.c.created_at)
+            .values(band_id=payload.band_id, setlist_name=payload.name, gig_id=payload.gig_id)
+            .returning(setlists.c.setlist_id, setlists.c.setlist_name, setlists.c.created_at)
         )
         .mappings()
         .first()
@@ -133,7 +133,7 @@ def create_setlist(
 
     return {
         "setlist_id": row["setlist_id"],
-        "name": row["name"],
+        "name": row["setlist_name"],
         "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
     }
 
@@ -153,7 +153,7 @@ def get_setlist(
         db.execute(
             select(setlist_songs)
             .where(setlist_songs.c.setlist_id == setlist_id)
-            .order_by(setlist_songs.c.order.asc())
+            .order_by(setlist_songs.c.song_order.asc())
         )
         .mappings()
         .all()
@@ -162,16 +162,16 @@ def get_setlist(
 
     return {
         "setlist_id": setlist["setlist_id"],
-        "name": setlist["name"],
+        "name": setlist["setlist_name"],
         "band_id": setlist["band_id"],
         "gig_id": setlist["gig_id"],
         "songs": [
             {
                 "song_id": row["song_id"],
-                "title": row["title"],
-                "artist": row["artist"],
+                "title": row["song_title"],
+                "artist": row["artist_name"],
                 "duration_minutes": float(row["duration_minutes"]),
-                "order": row["order"],
+                "order": row["song_order"],
             }
             for row in song_rows
         ],
@@ -194,7 +194,7 @@ def list_setlist_songs(
         db.execute(
             select(setlist_songs)
             .where(setlist_songs.c.setlist_id == setlist_id)
-            .order_by(setlist_songs.c.order.asc())
+            .order_by(setlist_songs.c.song_order.asc())
         )
         .mappings()
         .all()
@@ -204,10 +204,10 @@ def list_setlist_songs(
         "songs": [
             {
                 "song_id": row["song_id"],
-                "title": row["title"],
-                "artist": row["artist"],
+                "title": row["song_title"],
+                "artist": row["artist_name"],
                 "duration_minutes": float(row["duration_minutes"]),
-                "order": row["order"],
+                "order": row["song_order"],
             }
             for row in song_rows
         ],
@@ -228,13 +228,13 @@ def update_setlist(
 
     update_values = {}
     if payload.name is not None:
-        update_values["name"] = payload.name
+        update_values["setlist_name"] = payload.name
     if payload.gig_id is not None:
         update_values["gig_id"] = payload.gig_id
 
     now = datetime.now(timezone.utc)
     if update_values:
-        update_values["updated_at"] = now
+        update_values["last_updated"] = now
         db.execute(update(setlists).where(setlists.c.setlist_id == setlist_id).values(**update_values))
 
     return {"setlist_id": setlist_id, "updated_at": now.isoformat()}
@@ -270,7 +270,7 @@ def add_song(
 
     max_order = (
         db.execute(
-            select(func.coalesce(func.max(setlist_songs.c.order), 0)).where(
+            select(func.coalesce(func.max(setlist_songs.c.song_order), 0)).where(
                 setlist_songs.c.setlist_id == setlist_id
             )
         )
@@ -282,10 +282,10 @@ def add_song(
             insert(setlist_songs)
             .values(
                 setlist_id=setlist_id,
-                title=payload.title,
-                artist=payload.artist,
+                song_title=payload.title,
+                artist_name=payload.artist,
                 duration_minutes=payload.duration_minutes,
-                order=max_order + 1,
+                song_order=max_order + 1,
             )
             .returning(setlist_songs.c.song_id, setlist_songs.c.created_at)
         )
@@ -315,17 +315,16 @@ def update_song(
 
     update_values = {}
     if payload.title is not None:
-        update_values["title"] = payload.title
+        update_values["song_title"] = payload.title
     if payload.artist is not None:
-        update_values["artist"] = payload.artist
+        update_values["artist_name"] = payload.artist
     if payload.duration_minutes is not None:
         update_values["duration_minutes"] = payload.duration_minutes
     if payload.order is not None:
-        update_values["order"] = payload.order
+        update_values["song_order"] = payload.order
 
     now = datetime.now(timezone.utc)
     if update_values:
-        update_values["updated_at"] = now
         db.execute(
             update(setlist_songs)
             .where(setlist_songs.c.song_id == song_id)

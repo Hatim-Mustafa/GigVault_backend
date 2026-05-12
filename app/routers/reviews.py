@@ -26,7 +26,7 @@ def create_review(
 ):
     booking = (
         db.execute(
-            select(bookings_contracts, bands.c.created_by)
+            select(bookings_contracts, bands.c.leader_id)
             .select_from(bookings_contracts.join(bands, bookings_contracts.c.band_id == bands.c.band_id))
             .where(bookings_contracts.c.booking_id == payload.booking_id)
         )
@@ -49,15 +49,15 @@ def create_review(
         raise_app_error("FORBIDDEN", "Booking parties only", status_code=403)
 
     reviewer_id = current_user["user_id"]
-    reviewee_id = booking["venue_owner_id"] if is_band_member else booking["created_by"]
+    reviewee_id = booking["venue_owner_id"] if is_band_member else booking["leader_id"]
 
     existing = (
         db.execute(
-            select(reviews_disputes.c.record_id).where(
+            select(reviews_disputes.c.review_id).where(
                 and_(
                     reviews_disputes.c.booking_id == payload.booking_id,
                     reviews_disputes.c.reviewer_id == reviewer_id,
-                    reviews_disputes.c.type == "REVIEW",
+                    reviews_disputes.c.review_type == "Review",
                 )
             )
         ).first()
@@ -73,18 +73,18 @@ def create_review(
                 reviewer_id=reviewer_id,
                 reviewee_id=reviewee_id,
                 rating=payload.rating,
-                comment=payload.comment,
-                type="REVIEW",
-                status="PENDING",
+                review_text=payload.comment,
+                review_type="Review",
+                status="Open",
             )
-            .returning(reviews_disputes.c.record_id, reviews_disputes.c.created_at)
+            .returning(reviews_disputes.c.review_id, reviews_disputes.c.created_at)
         )
         .mappings()
         .first()
     )
 
     return {
-        "review_id": row["record_id"],
+        "review_id": row["review_id"],
         "booking_id": payload.booking_id,
         "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
     }
@@ -95,19 +95,20 @@ def get_review(review_id: int, current_user=Depends(get_current_user), db=Depend
     row = (
         db.execute(
             select(
-                reviews_disputes.c.record_id,
+                reviews_disputes.c.review_id,
                 reviews_disputes.c.booking_id,
                 reviews_disputes.c.reviewer_id,
                 reviews_disputes.c.rating,
-                reviews_disputes.c.comment,
+                reviews_disputes.c.review_text,
                 reviews_disputes.c.created_at,
-                users.c.name,
+                users.c.first_name,
+                users.c.last_name,
             )
             .select_from(reviews_disputes.join(users, reviews_disputes.c.reviewer_id == users.c.user_id))
             .where(
                 and_(
-                    reviews_disputes.c.record_id == review_id,
-                    reviews_disputes.c.type == "REVIEW",
+                    reviews_disputes.c.review_id == review_id,
+                    reviews_disputes.c.review_type == "Review",
                 )
             )
         )
@@ -118,11 +119,14 @@ def get_review(review_id: int, current_user=Depends(get_current_user), db=Depend
         raise_app_error("NOT_FOUND", "Review not found", status_code=404)
 
     return {
-        "review_id": row["record_id"],
+        "review_id": row["review_id"],
         "booking_id": row["booking_id"],
-        "reviewer": {"user_id": row["reviewer_id"], "name": row["name"]},
+        "reviewer": {
+            "user_id": row["reviewer_id"],
+            "name": f"{row['first_name']} {row['last_name']}".strip(),
+        },
         "rating": row["rating"],
-        "comment": row["comment"],
+        "comment": row["review_text"],
         "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
     }
 
@@ -139,16 +143,17 @@ def list_reviews(
     page, limit, offset = get_pagination(page, limit)
 
     stmt = select(
-        reviews_disputes.c.record_id,
+        reviews_disputes.c.review_id,
         reviews_disputes.c.reviewer_id,
         reviews_disputes.c.reviewee_id,
         reviews_disputes.c.rating,
-        reviews_disputes.c.comment,
+        reviews_disputes.c.review_text,
         reviews_disputes.c.created_at,
-        users.c.name.label("reviewer_name"),
+        users.c.first_name,
+        users.c.last_name,
     ).select_from(reviews_disputes.join(users, reviews_disputes.c.reviewer_id == users.c.user_id))
 
-    stmt = stmt.where(reviews_disputes.c.type == "REVIEW")
+    stmt = stmt.where(reviews_disputes.c.review_type == "Review")
     if user_id:
         stmt = stmt.where(reviews_disputes.c.reviewee_id == user_id)
     if author_id:
@@ -162,10 +167,10 @@ def list_reviews(
         "page": page,
         "reviews": [
             {
-                "review_id": row["record_id"],
-                "reviewer_name": row["reviewer_name"],
+                "review_id": row["review_id"],
+                "reviewer_name": f"{row['first_name']} {row['last_name']}".strip(),
                 "rating": row["rating"],
-                "comment": row["comment"],
+                "comment": row["review_text"],
                 "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
             }
             for row in rows
