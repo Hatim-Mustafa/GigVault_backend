@@ -22,8 +22,9 @@
 
 ## Technology Stack
 - **Language:** Python (Flask or FastAPI)
-- **Database:** PostgreSQL or MySQL
-- **Authentication:** JWT (JSON Web Tokens)
+- **Database:** Supabase PostgreSQL (managed)
+- **Database Access:** SQLAlchemy Core (create_engine, MetaData, Table, insert/select/update/delete) using psycopg2 driver
+- **Authentication:** JWT (JSON Web Tokens, app-managed)
 - **API Format:** RESTful JSON
 
 ## Base URL
@@ -36,6 +37,22 @@ http://localhost:5000/api/v1
 - Pagination default: `page=1, limit=10`
 - All list endpoints support pagination
 - All write operations return 201 (Created) or 200 (Updated)
+- All database access uses SQLAlchemy Core with bound parameters only (no ORM models)
+
+## Database Access (Supabase)
+- Build the SQLAlchemy engine using the provided variables: `db_host`, `db_port`, `db_name`, `db_user`, `db_password`
+- URL-encode the password with `quote_plus`
+- SSL is required (`sslmode=require`)
+- Use a small, explicit connection pool; prefer Supabase PgBouncer for high concurrency
+- Use `sessionmaker` for transactions and always commit/rollback
+- Prefer SQLAlchemy Core expressions or text queries with bound parameters
+- Prefer server-side timestamps with `NOW()` for created/updated fields
+- Keep all tables in the `public` schema unless explicitly needed elsewhere
+
+Example DSN format:
+```
+postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@{db_host}:{db_port}/{db_name}?sslmode=require
+```
 
 ---
 
@@ -45,6 +62,11 @@ http://localhost:5000/api/v1
 - Token issued on login, valid for 24 hours
 - Refresh token valid for 7 days
 - Include token in header: `Authorization: Bearer <token>`
+
+## Auth Implementation Notes
+- JWTs are issued and validated by the API service (Supabase Auth is not used by default)
+- Passwords are stored as bcrypt or Argon2 hashes
+- If token revocation is required, store refresh tokens in a dedicated table
 
 ## Role-Based Access Control (RBAC)
 ```
@@ -1902,6 +1924,7 @@ All endpoints return errors in this format:
 | `NOT_FOUND` | 404 | Resource not found |
 | `CONFLICT` | 409 | Duplicate entry / constraint violation |
 | `VALIDATION_ERROR` | 400 | Invalid input parameters |
+| `DB_ERROR` | 500 | Database transaction or SQL error |
 | `INTERNAL_ERROR` | 500 | Server error |
 
 ---
@@ -1924,6 +1947,8 @@ Rate limiting applies per IP/user:
 # Indexing & Performance
 
 Create these indexes for query performance:
+
+Apply these indexes in Supabase using SQL migrations or the SQL editor. Use `CREATE INDEX CONCURRENTLY` in production to minimize locks.
 
 ```sql
 -- Gigs
@@ -1958,6 +1983,16 @@ CREATE INDEX idx_recruitment_ads_city ON recruitment_ads(city);
 ---
 
 # Deployment & Testing
+
+## Supabase Environment Variables
+
+- `db_host` (Supabase pooler host)
+- `db_port`
+- `db_name`
+- `db_user`
+- `db_password`
+- `DB_POOL_SIZE` (small pool, adjust based on traffic)
+- `DB_STATEMENT_TIMEOUT_MS` (recommended 5000-15000ms)
 
 ## Pre-deployment Checklist
 
