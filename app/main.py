@@ -29,7 +29,7 @@ from .routers import (
     setlists,
     users,
 )
-from .security import decode_token
+from .security import decode_token, to_api_role
 
 ROLE_LIMITS = {
     "UNAUTH": 60,
@@ -67,7 +67,7 @@ async def rate_limit_middleware(request: Request, call_next):
         token = auth_header.split(" ", 1)[1].strip()
         try:
             payload = decode_token(token)
-            role = payload.get("role", "UNAUTH")
+            role = to_api_role(payload.get("role", "UNAUTH"))
         except Exception:
             role = "UNAUTH"
 

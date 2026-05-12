@@ -3,7 +3,7 @@ from sqlalchemy import select
 
 from .db import SessionLocal
 from .errors import raise_app_error
-from .security import decode_token
+from .security import decode_token, to_api_role
 from .tables import users
 
 
@@ -34,7 +34,9 @@ def get_current_user(authorization: str | None = Header(default=None), db=Depend
         raise_app_error("UNAUTHORIZED", "User not found", status_code=401)
     if user.get("is_active") is False:
         raise_app_error("FORBIDDEN", "User is inactive", status_code=403)
-    return user
+    user_dict = dict(user)
+    user_dict["role"] = to_api_role(user_dict.get("role", ""))
+    return user_dict
 
 
 def require_role(*roles: str):

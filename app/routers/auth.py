@@ -15,6 +15,8 @@ from ..security import (
     create_refresh_token,
     decode_token,
     hash_password,
+    to_api_role,
+    to_db_role,
     verify_password,
 )
 from ..tables import users
@@ -67,6 +69,7 @@ def register(payload: RegisterRequest, db=Depends(get_db)):
     password_hash = hash_password(payload.password)
     first_name, last_name = _split_name(payload.name)
     username = _build_unique_username(payload.email, db)
+    db_role = to_db_role(payload.role)
     stmt = (
         insert(users)
         .values(
@@ -75,7 +78,7 @@ def register(payload: RegisterRequest, db=Depends(get_db)):
             password_hash=password_hash,
             first_name=first_name,
             last_name=last_name,
-            role=payload.role,
+            role=db_role,
             city=payload.city,
             bio=payload.bio,
         )
@@ -99,7 +102,7 @@ def register(payload: RegisterRequest, db=Depends(get_db)):
         "email": row["email"],
         "username": row["username"],
         "name": f"{row['first_name']} {row['last_name']}".strip(),
-        "role": row["role"],
+        "role": to_api_role(row["role"]),
         "created_at": (
             row["account_created_at"].isoformat() if row["account_created_at"] else None
         ),
@@ -112,8 +115,9 @@ def login(payload: LoginRequest, db=Depends(get_db)):
     if not user or not verify_password(payload.password, user["password_hash"]):
         raise_app_error("INVALID_CREDENTIALS", "Email or password incorrect", status_code=401)
 
-    access_token = create_access_token(user["user_id"], user["role"])
-    refresh_token, refresh_expires_at = create_refresh_token(user["user_id"], user["role"])
+    api_role = to_api_role(user["role"])
+    access_token = create_access_token(user["user_id"], api_role)
+    refresh_token, refresh_expires_at = create_refresh_token(user["user_id"], api_role)
 
     return {
         "access_token": access_token,
@@ -123,7 +127,7 @@ def login(payload: LoginRequest, db=Depends(get_db)):
             "user_id": user["user_id"],
             "email": user["email"],
             "name": f"{user.get('first_name', '')} {user.get('last_name', '')}".strip(),
-            "role": user["role"],
+            "role": api_role,
         },
     }
 
@@ -143,7 +147,7 @@ def refresh_token(authorization: str | None = Header(default=None), db=Depends(g
     if not user:
         raise_app_error("UNAUTHORIZED", "User not found", status_code=401)
 
-    access_token = create_access_token(user_id, payload.get("role", ""))
+    access_token = create_access_token(user_id, to_api_role(payload.get("role", "")))
     return {"access_token": access_token, "expires_in": settings.access_token_expires_seconds}
 
 

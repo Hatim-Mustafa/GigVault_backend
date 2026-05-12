@@ -7,6 +7,14 @@ from .config import settings
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
+ROLE_TO_DB = {
+    "ADMIN": "Admin",
+    "MUSICIAN": "Musician",
+    "VENUE_OWNER": "Venue_Owner",
+}
+
+ROLE_TO_API = {db_role: api_role for api_role, db_role in ROLE_TO_DB.items()}
+
 
 def hash_password(password: str) -> str:
     return pwd_context.hash(password)
@@ -54,3 +62,14 @@ def decode_token(token: str, token_type: str | None = None) -> dict:
     if token_type and payload.get("type") != token_type:
         raise ValueError("Invalid token type")
     return payload
+
+
+def to_db_role(role: str) -> str:
+    normalized = role.strip().upper()
+    return ROLE_TO_DB.get(normalized, role)
+
+
+def to_api_role(role: str) -> str:
+    if role in ROLE_TO_API:
+        return ROLE_TO_API[role]
+    return role.strip().upper()
